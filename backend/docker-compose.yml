@@ -1,0 +1,96 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — Orchestrates all services
+#
+# Services:
+#   api      - FastAPI application
+#   postgres - PostgreSQL relational database
+#   qdrant   - Vector database for embeddings
+#
+# Run everything: docker-compose up --build
+# Stop everything: docker-compose down
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine          # Alpine variant = smaller image
+    container_name: fdm_postgres
+    restart: unless-stopped            # Restart if it crashes, not if manually stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password      # Change in production!
+      POSTGRES_DB: financial_docs
+    ports:
+      - "5432:5432"                    # host:container
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # Persist data between restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Qdrant Vector Database ──────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: fdm_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"    # REST API
+      - "6334:6334"    # gRPC API
+    volumes:
+      - qdrant_data:/qdrant/storage    # Persist vectors between restarts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Application ─────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime                  # Use the runtime stage (not builder)
+    container_name: fdm_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # These override the .env file values inside the container
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: "change-this-to-a-random-64-char-secret-in-production!!"
+      DATABASE_URL: "postgresql://postgres:password@postgres:5432/financial_docs"
+      QDRANT_HOST: qdrant              # Docker service name resolves to IP
+      QDRANT_PORT: "6333"
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - uploads_data:/app/uploads      # Persist uploaded files
+    depends_on:
+      postgres:
+        condition: service_healthy     # Wait for Postgres to be ready
+      qdrant:
+        condition: service_healthy     # Wait for Qdrant to be ready
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+
+# ── Named Volumes ───────────────────────────────────────────────────────────────
+# Volumes persist data even when containers are stopped or recreated.
+# They are stored in Docker's managed storage (/var/lib/docker/volumes/).
+volumes:
+  postgres_data:
+  qdrant_data:
+  uploads_data:
+
+
+# ── Networks ────────────────────────────────────────────────────────────────────
+# By default, Compose creates a single network so all services can talk to each other.
+# Services can reference each other by service name (e.g., "postgres", "qdrant").
